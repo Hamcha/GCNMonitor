@@ -1,4 +1,5 @@
 #define GC0_PIN 2
+#define DEBUG_PIN 3
 
 void setup() {
 	// Shut down status LED until a controller is detected
@@ -6,31 +7,36 @@ void setup() {
 	pinMode(13, OUTPUT);
 
 	// Setup Serial IO
-	Serial.begin(115200);
+	Serial.begin(4800);
 
 	// Setup GC pin (one for now)
-	pinMode(GC0_PIN, INPUT_PULLUP);
+	pinMode(GC0_PIN, INPUT);
 	digitalWrite(GC0_PIN, HIGH);
+
+	pinMode(DEBUG_PIN, OUTPUT);
+	digitalWrite(DEBUG_PIN, LOW);
 }
 
-unsigned long gcvalue = 0;
+unsigned char gcvalue[12] = { 0 };
 
 void loop() {
-	digitalWrite(13, HIGH);
+	memset(gcvalue, 0, 3);
 	noInterrupts();
 	int success = readGC();
 	interrupts();
-	digitalWrite(13, LOW);
 	if (success > 0) {
-		Serial.print(gcvalue, BIN);
-		Serial.write('\n');
+		// Poll signal from console: 0100 0000 0000 0011 0000 0010 = 0x400302
+		for (int i = 3; i < 12; ++i) {
+			Serial.write(gcvalue[i]);
+		}
+		Serial.println();
+		Serial.flush();
 	}
 }
 
 int readGC() {
-	unsigned char* gcbytes = (unsigned char*) &gcvalue;
+	unsigned char* gcbytes = gcvalue;
 	int ret = 0;
-	gcvalue = 0;
 	asm volatile (
 		"ldi  r25, lo8(0)\n"    // 1   - Reset counter r25 (Bit count)
 		"ld   r23, Z\n"         // 2   - Load first byte into r23 (Current byte)
@@ -51,12 +57,17 @@ int readGC() {
 
 		"nop\nnop\nnop\nnop\n"  // Manual padding
 		"nop\nnop\nnop\nnop\n"  // Move to around the half part of the bit
-		"nop\nnop\nnop\nnop\n"  // 32 cycles, Around 2us
+		"nop\nnop\nnop\nnop\n"  // 29 cycles, Around 2us
 		"nop\nnop\nnop\nnop\n"
 		"nop\nnop\nnop\nnop\n"
 		"nop\nnop\nnop\nnop\n"
 		"nop\nnop\nnop\nnop\n"
-		"nop\nnop\nnop\nnop\n"
+		"nop\n"
+
+		// Set and reset debug signal
+		"sbi 0x9, 3\n"
+		"nop\n"
+		"cbi 0x9, 3\n"
 
 		// Add current bit value to the current byte
 		"lsl  r23\n"            // 1   - Shift left (advance current bit)
@@ -66,11 +77,11 @@ int readGC() {
 
 								// Check for end of byte or message
 		"subi r25, lo8(-1)\n"   // 1   - Increment bit counter
-		"cpi  r25, lo8(9)\n"   // 1   - Check if we have enough bits
+		"cpi  r25, lo8(90)\n"   // 1   - Check if we have enough bits
 		"breq .L%=_return\n"    // 1/2 - Exit with success if so
 		"mov  r24, r25\n"       // 1   - Copy counter for masking
 		"andi r24, lo8(7)\n"    // 1   - Mask last 3 bits (% 8)
-		"brne .L%=_wait_end\n"  // 1   - Not a full byte, go wait for next bit
+		"brne .L%=_wait_end\n"  // 1/2 - Not a full byte, go wait for next bit
 		"adiw r30, 1\n"         // 2   - Add one to the byte pointer
 		"ld   r23, Z\n"         // 2   - Load new byte into r23 (Current byte)
 
@@ -84,7 +95,7 @@ int readGC() {
 		"brne .L%=_wait_high\n" // 1/2 - Retry if the timeout hasn't expired
 		"ldi  %[ret], lo8(0)\n" // 1   - Load error return value into [ret]
 
-		".L%=_return:\n"
+".L%=_return:\n"
 		: [ret] "=r" (ret), "+z" (gcbytes)
 		:: "r25", "r24", "r23"
 	);
